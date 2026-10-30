@@ -1,0 +1,114 @@
+trigger:
+- aepw-prd-main
+
+pool:
+  vmImage: ubuntu-latest
+
+resources:
+  repositories:
+  - repository: githubRepo
+    type: github
+    endpoint: 'github.com_imtportal'
+    name: 'imtportal/aepw-prd-worker'
+
+steps:
+
+# Checkout Azure DevOps repository
+- checkout: self
+  clean: true
+  path: s/AEPW-Func-Worker
+
+# Checkout GitHub repository
+- checkout: githubRepo
+  persistCredentials: true
+  path: s/aepw-prd-worker
+
+# Synchronize Azure Repo -> GitHub working tree
+- script: |
+    set -e
+
+    AZURE_REPO="$(Pipeline.Workspace)/s/AEPW-Func-Worker"
+    GITHUB_REPO="$(Pipeline.Workspace)/s/aepw-prd-worker"
+    TEMP_DIR="$(Pipeline.Workspace)/azure-sync"
+
+    echo "===== Azure Repository ====="
+    echo "$AZURE_REPO"
+
+    echo "===== GitHub Repository ====="
+    echo "$GITHUB_REPO"
+
+    echo "===== Fetching latest GitHub main ====="
+
+    cd "$GITHUB_REPO"
+
+    git fetch origin main
+
+    echo "===== Resetting GitHub working tree to latest main ====="
+
+    git reset --hard origin/main
+
+    echo "===== Creating Azure source snapshot ====="
+
+    rm -rf "$TEMP_DIR"
+    mkdir -p "$TEMP_DIR"
+
+    cd "$AZURE_REPO"
+
+    git archive HEAD | tar -x -C "$TEMP_DIR"
+
+    echo "===== Synchronizing Azure files into GitHub working tree ====="
+
+    cd "$GITHUB_REPO"
+
+    rsync -av --delete \
+      --exclude='.git/' \
+      --exclude='.github/' \
+      "$TEMP_DIR/" \
+      "$GITHUB_REPO/"
+
+    echo "===== GitHub repository status ====="
+
+    git status --short
+
+  displayName: 'Sync Azure files to GitHub'
+
+# Commit and push changes to GitHub main
+- script: |
+    set -e
+
+    GITHUB_REPO="$(Pipeline.Workspace)/s/aepw-prd-worker"
+
+    cd "$GITHUB_REPO"
+
+    echo "===== GitHub changes before commit ====="
+
+    git status --short
+
+    git config user.name "Azure DevOps"
+    git config user.email "azure-devops@local"
+
+    echo "===== Staging changes except .github ====="
+
+    git add -A
+
+    # Never include GitHub-specific workflows/configuration
+    git reset -- .github/
+
+    echo "===== Changes to be committed ====="
+
+    git status --short
+
+    if git diff --cached --quiet; then
+      echo "No changes to commit."
+      exit 0
+    fi
+
+    echo "===== Creating GitHub sync commit ====="
+
+    git commit -m "Sync from Azure Repo aepw-main"
+
+    echo "===== Pushing to GitHub main ====="
+
+    git push origin HEAD:main
+
+  displayName: 'Commit and push changes to GitHub'

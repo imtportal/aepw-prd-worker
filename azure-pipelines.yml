@@ -1,0 +1,117 @@
+# =============================================================================
+# azure-pipelines.yml
+# CI/CD: Build and deploy to an Azure Function App on push/merge to main.
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+# Deploy pipeline should NOT run on pull requests (only on merge to main).
+pr: none
+
+# -----------------------------------------------------------------------------
+# UPDATE THESE VALUES FOR YOUR ENVIRONMENT
+# -----------------------------------------------------------------------------
+variables:
+  azureServiceConnection: 'AZURE_SERVICE_CONNECTION'  # ARM service connection name (Project Settings > Service connections)
+  functionAppName:        'func-aepw-worker'           # Target Azure Function App name
+  functionAppType:        'functionAppLinux'               # Windows plan ('functionAppLinux' would be for Linux)
+  functionProject:        '**/Aepw.Evidence.Worker.csproj' # The Function App project (net8.0 isolated worker)
+  # ---------------------------------------------------------------------------
+  buildConfiguration:     'Release'
+  dotnetVersion:          '10.0.x'                     # Match your Function App runtime (log shows .NET 8)
+  vmImageName:            'ubuntu-latest'
+  workingDirectory:       '$(System.DefaultWorkingDirectory)'
+
+stages:
+# =============================================================================
+# STAGE 1: BUILD
+# =============================================================================
+- stage: Build
+  displayName: 'Build'
+  jobs:
+  - job: Build
+    displayName: 'Build and package'
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK $(dotnetVersion)'
+      inputs:
+        packageType: 'sdk'
+        version: $(dotnetVersion)
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore'
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Build'
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+
+    # OPTIONAL: enable if you have unit tests
+    # - task: DotNetCoreCLI@2
+    #   displayName: 'Test'
+    #   inputs:
+    #     command: 'test'
+    #     projects: '**/*Tests.csproj'
+    #     arguments: '--configuration $(buildConfiguration) --no-build'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish (zip)'
+      inputs:
+        command: 'publish'
+        publishWebProjects: false
+        projects: '$(functionProject)'
+        arguments: '--configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/output'
+        zipAfterPublish: true
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish pipeline artifact'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/output'
+        artifact: 'drop'
+        publishLocation: 'pipeline'
+
+# =============================================================================
+# STAGE 2: DEPLOY
+# =============================================================================
+- stage: Deploy
+  displayName: 'Deploy'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    displayName: 'Deploy to Azure Function App'
+    # 'environment' enables deployment history + optional approval gates.
+    # Configure approvals under Pipelines > Environments > production > Approvals and checks.
+    environment: 'production'
+    pool:
+      vmImage: $(vmImageName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: 'drop'
+
+          - task: AzureFunctionApp@2
+            displayName: 'Deploy Azure Function App'
+            inputs:
+              connectionType: 'AzureRM'
+              azureSubscription: $(azureServiceConnection)
+              appType: $(functionAppType)
+              appName: $(functionAppName)
+              package: '$(Pipeline.Workspace)/drop/*.zip'
+              deploymentMethod: 'auto'   # 'auto' lets the task pick zip-deploy/run-from-package

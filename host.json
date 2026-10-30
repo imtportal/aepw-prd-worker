@@ -1,0 +1,21 @@
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": { "isEnabled": false }
+    },
+    "logLevel": {
+      "default": "Information",
+      "Aepw.Evidence.Worker": "Information",
+      "Host.Results": "Information",
+      "Function": "Information"
+    }
+  },
+  "extensions": {
+    "serviceBus": {
+      "maxConcurrentCalls": 2,
+      "maxAutoLockRenewalDuration": "00:06:00",
+      "autoCompleteMessages": false
+    }
+  }
+}
