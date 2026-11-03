@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_NAME: 'aepw-func-prd-worker'
+  AZURE_FUNCTIONAPP_NAME: 'aepw-worker'
   DOTNET_VERSION: '10.0.x'
 
 jobs:
