@@ -22,28 +22,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Verify project file
+        run: |
+          echo "Checking project file..."
+          ls -lah
+          test -f "${{ env.PROJECT_FILE }}" || {
+            echo "ERROR: Project file not found: ${{ env.PROJECT_FILE }}"
+            exit 1
+          }
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore dependencies
-        run: dotnet restore ${{ env.PROJECT_FILE }}
+        run: dotnet restore "${{ env.PROJECT_FILE }}"
 
       - name: Build
         run: |
-          dotnet build ${{ env.PROJECT_FILE }} \
+          dotnet build "${{ env.PROJECT_FILE }}" \
             --configuration Release \
             --no-restore
 
       - name: Publish Function App
         run: |
-          rm -rf ${{ env.PUBLISH_DIR }}
+          rm -rf "${{ env.PUBLISH_DIR }}"
 
-          dotnet publish ${{ env.PROJECT_FILE }} \
+          dotnet publish "${{ env.PROJECT_FILE }}" \
             --configuration Release \
             --no-restore \
-            --output ${{ env.PUBLISH_DIR }}
+            --output "${{ env.PUBLISH_DIR }}"
 
       - name: Verify Function package
         shell: bash
@@ -51,7 +60,7 @@ jobs:
           set -e
 
           echo "===== PUBLISH DIRECTORY ====="
-          ls -lah ${{ env.PUBLISH_DIR }}
+          ls -lah "${{ env.PUBLISH_DIR }}"
 
           echo "===== REQUIRED FILES ====="
 
@@ -69,16 +78,18 @@ jobs:
             echo "FOUND: $file"
           done
 
-          echo "===== WORKER CONFIG ====="
-          cat "${{ env.PUBLISH_DIR }}/worker.config.json"
+          echo "===== WORKER CONFIG VALIDATION ====="
+          jq empty "${{ env.PUBLISH_DIR }}/worker.config.json"
 
-          echo "===== METADATA LOADER ====="
+          echo "===== METADATA LOADER VALIDATION ====="
           if [ ! -f "${{ env.PUBLISH_DIR }}/.azurefunctions/Microsoft.Azure.WebJobs.Extensions.FunctionMetadataLoader.dll" ]; then
             echo "ERROR: FunctionMetadataLoader.dll missing"
             exit 1
           fi
 
-          echo "PACKAGE VALIDATION SUCCESSFUL"
+          echo "FOUND: FunctionMetadataLoader.dll"
+
+          echo "===== PACKAGE VALIDATION SUCCESSFUL ====="
 
       - name: Deploy to Azure Function
         uses: Azure/functions-action@v1
