@@ -10,13 +10,14 @@ on:
 env:
   AZURE_FUNCTIONAPP_NAME: 'aepw-worker'
   DOTNET_VERSION: '10.0.x'
+  PROJECT_FILE: 'Aepw.Evidence.Worker.csproj'
+  PUBLISH_DIR: './publish'
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -26,55 +27,70 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore dependencies
-        run: |
-          dotnet restore Aepw.Evidence.Worker.csproj
+        run: dotnet restore ${{ env.PROJECT_FILE }}
 
       - name: Build
         run: |
-          dotnet build Aepw.Evidence.Worker.csproj \
+          dotnet build ${{ env.PROJECT_FILE }} \
             --configuration Release \
             --no-restore
 
       - name: Publish Function App
         run: |
-          dotnet publish Aepw.Evidence.Worker.csproj \
+          rm -rf ${{ env.PUBLISH_DIR }}
+
+          dotnet publish ${{ env.PROJECT_FILE }} \
             --configuration Release \
-            --output ./publish
+            --no-restore \
+            --output ${{ env.PUBLISH_DIR }}
 
       - name: Verify Function package
+        shell: bash
         run: |
-          echo "===== PUBLISH FILES ====="
-          find ./publish -maxdepth 2 -type f | sort
+          set -e
 
-          echo "===== FUNCTIONS METADATA ====="
-          if [ -f ./publish/functions.metadata ]; then
-            cat ./publish/functions.metadata
-          else
-            echo "ERROR: functions.metadata is missing"
+          echo "===== PUBLISH DIRECTORY ====="
+          ls -lah ${{ env.PUBLISH_DIR }}
+
+          echo "===== REQUIRED FILES ====="
+
+          # Note: functions.metadata is NOT required with Azure.Functions.Sdk/1.0.0.
+          # That SDK uses worker-side indexing (workerIndexing=true in worker.config.json);
+          # the host fetches function metadata from the worker at runtime via gRPC.
+          for file in \
+            host.json \
+            worker.config.json \
+            extensions.json
+          do
+            if [ ! -s "${{ env.PUBLISH_DIR }}/$file" ]; then
+              echo "ERROR: $file is missing or empty"
+              exit 1
+            fi
+
+            echo "FOUND: $file"
+          done
+
+          echo "===== WORKER CONFIG VALIDATION ====="
+          jq empty "${{ env.PUBLISH_DIR }}/worker.config.json"
+          WORKER_INDEXING=$(jq -r '.description.workerIndexing' "${{ env.PUBLISH_DIR }}/worker.config.json")
+          echo "workerIndexing: $WORKER_INDEXING"
+          if [ "$WORKER_INDEXING" != "true" ]; then
+            echo "ERROR: worker.config.json does not have workerIndexing=true"
             exit 1
           fi
 
-          echo "===== WORKER CONFIG ====="
-          if [ -f ./publish/worker.config.json ]; then
-            cat ./publish/worker.config.json
-          else
-            echo "ERROR: worker.config.json is missing"
+          echo "===== METADATA LOADER VALIDATION ====="
+          if [ ! -f "${{ env.PUBLISH_DIR }}/.azurefunctions/Microsoft.Azure.WebJobs.Extensions.FunctionMetadataLoader.dll" ]; then
+            echo "ERROR: FunctionMetadataLoader.dll missing from .azurefunctions/"
             exit 1
           fi
+          echo "FOUND: .azurefunctions/Microsoft.Azure.WebJobs.Extensions.FunctionMetadataLoader.dll"
 
-          echo "===== HOST JSON ====="
-          if [ -f ./publish/host.json ]; then
-            cat ./publish/host.json
-          else
-            echo "ERROR: host.json is missing"
-            exit 1
-          fi
+          echo "===== PACKAGE VALIDATION SUCCESSFUL ====="
 
       - name: Deploy to Azure Function
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-          sku: flexconsumption
-          package: ./publish
-          remote-build: false
+          package: ${{ env.PUBLISH_DIR }}
