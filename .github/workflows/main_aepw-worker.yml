@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 
 name: Build and Deploy Azure Function
 
@@ -97,3 +98,85 @@ jobs:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
           package: ${{ env.PUBLISH_DIR }}
+=======
+name: Build and Deploy Azure Function
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_NAME: 'aepw-worker'
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: |
+          dotnet restore Aepw.Evidence.Worker.csproj
+
+      - name: Build
+        run: |
+          dotnet build Aepw.Evidence.Worker.csproj \
+            --configuration Release \
+            --no-restore
+
+      - name: Publish Function App
+        run: |
+          dotnet publish Aepw.Evidence.Worker.csproj \
+            --configuration Release \
+            --output ./publish
+
+      - name: Verify Function package
+        run: |
+          echo "===== PUBLISH FILES ====="
+          find ./publish -maxdepth 2 -type f | sort
+
+          echo "===== FUNCTIONS METADATA ====="
+          if [ -f ./publish/functions.metadata ]; then
+            cat ./publish/functions.metadata
+          else
+            echo "ERROR: functions.metadata is missing"
+            exit 1
+          fi
+
+          echo "===== WORKER CONFIG ====="
+          if [ -f ./publish/worker.config.json ]; then
+            cat ./publish/worker.config.json
+          else
+            echo "ERROR: worker.config.json is missing"
+            exit 1
+          fi
+
+          echo "===== HOST JSON ====="
+          if [ -f ./publish/host.json ]; then
+            cat ./publish/host.json
+          else
+            echo "ERROR: host.json is missing"
+            exit 1
+          fi
+
+      - name: Deploy to Azure Function
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          sku: flexconsumption
+          package: ./publish
+          remote-build: false
+>>>>>>> c617c0a648ffce9cbbb75241a88310810aa605a9
