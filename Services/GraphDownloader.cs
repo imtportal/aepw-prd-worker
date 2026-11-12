@@ -42,6 +42,45 @@ public sealed class GraphDownloader
         return url;
     }
 
+    /// <summary>
+    /// Returns the content fingerprint for a driveItem from Graph metadata — no download needed.
+    /// Prefers quickXorHash (SharePoint-native, changes only with content); falls back to
+    /// sha256Hash if present. Returns null if neither is available, or on any Graph error.
+    /// A null result never blocks the upload.
+    /// </summary>
+    public async Task<string?> GetFileHashAsync(
+        string driveId,
+        string itemId,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var item = await _graph.Drives[driveId].Items[itemId].GetAsync(cancellationToken: ct);
+
+            var hash = item?.File?.Hashes?.QuickXorHash;
+            if (!string.IsNullOrEmpty(hash))
+            {
+                _log.LogInformation("[GRAPH] quickXorHash for {ItemId}: {Hash}", itemId, hash);
+                return hash;
+            }
+
+            hash = item?.File?.Hashes?.Sha256Hash;
+            if (!string.IsNullOrEmpty(hash))
+            {
+                _log.LogInformation("[GRAPH] sha256Hash for {ItemId}: {Hash}", itemId, hash);
+                return hash;
+            }
+
+            _log.LogInformation("[GRAPH] No hash in Graph metadata for {ItemId}.", itemId);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[GRAPH] Could not fetch item metadata for hash (ItemId={Item}); hash will be null.", itemId);
+            return null;
+        }
+    }
+
     public async Task<byte[]> DownloadAsync(
         string driveId,
         string itemId,

@@ -16,4 +16,11 @@ public sealed class ProcessingRequest
     public long SizeBytes { get; set; }
     public string? WebUrl { get; set; }
     public DateTime ReceivedUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Populated by the Worker after fetching Graph metadata (quickXorHash → sha256Hash),
+    /// or computed as SHA-256 from downloaded bytes if Graph exposes no hash.
+    /// Null if neither source is available — never blocks the upload.
+    /// </summary>
+    public string? FileHash { get; set; }
 }

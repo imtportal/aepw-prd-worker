@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Aepw.Evidence.Worker.Models;
 using Aepw.Evidence.Worker.Services;
@@ -11,7 +12,7 @@ namespace Aepw.Evidence.Worker.Functions;
 /// <summary>
 /// FUNCTION #2 — the Worker. Verbose, step-by-step logging so each stage is visible in the logs:
 ///   [1] message received  →  [2] parse body  →  [3] event type  →  [4] parse WebUrl
-///   →  [5] SQL save        →  [6] download    →  [7] process API  →  [8] done
+///   →  [5] get file hash  →  [6] download    →  [7] SQL save    →  [8] process API  →  [9] done
 /// deleted events call the delete SP (soft delete by ItemId) at [STEP 3].
 ///
 /// Message settlement is manual (host.json: autoCompleteMessages = false) so the retry budget is
@@ -124,18 +125,11 @@ public sealed class EvidenceWorker
             _log.LogInformation("[STEP 4] Parsed WebUrl: SiteName={Site}, DocLib={Lib}, ProjectPin={Pin}, QuarterCode={Quarter}, MetricCategory={Cat}, TopMetric={Top}, FileName={File}",
                 path.SiteName, path.DocumentLibrary, path.ProjectPin, path.QuarterCode, path.MetricCategory, path.TopMetric, path.FileName);
 
-            // ---- [5] SQL SAVE (stored procedure) -----------------------------------------
-            _log.LogInformation("[STEP 5] Calling SQL save SP (projectPin={Pin}, quarterCode={Quarter}, metricCode={Metric})...",
-                path.ProjectPin, path.QuarterCode, path.TopMetric);
-            var save = await _sql.SaveAsync(req, path, ct);
-            _log.LogInformation("[STEP 5] SP returned: Data(EvidenceId)={Id}, Message='{Msg}'.", save.EvidenceId, save.Message);
-
-            if (!save.IsSuccess)
-            {
-                _log.LogError("[STEP 5] SP reported FAILURE (Data=0). Message='{Msg}'. Will retry -> DLQ.", save.Message);
-                throw new TransientApiException($"Save SP error for {req.FileName}: {save.Message}");
-            }
-            _log.LogInformation("[STEP 5] SAVE SUCCESS. EvidenceId={Id}.", save.EvidenceId);
+            // ---- [5] GET FILE HASH (Graph metadata — no download needed) ----------------
+            _log.LogInformation("[STEP 5] Fetching file hash from Graph metadata (DriveId={Drive}, ItemId={Item})...",
+                req.DriveId, req.ItemId);
+            req.FileHash = await _downloader.GetFileHashAsync(req.DriveId, req.ItemId, ct);
+            _log.LogInformation("[STEP 5] Graph hash: {Hash}.", req.FileHash ?? "(none — will try SHA-256 after download)");
 
             // ---- [6] DOWNLOAD FILE (Graph) -----------------------------------------------
             _log.LogInformation("[STEP 6] Downloading file from Graph (DriveId={Drive}, ItemId={Item})...",
@@ -143,14 +137,34 @@ public sealed class EvidenceWorker
             var bytes = await _downloader.DownloadAsync(req.DriveId, req.ItemId, ct);
             _log.LogInformation("[STEP 6] DOWNLOAD SUCCESS. {Bytes} bytes.", bytes.Length);
 
-            // ---- [7] PROCESS API (Document Intelligence) ---------------------------------
-            _log.LogInformation("[STEP 7] Calling Backend API /process (EvidenceId={Id}, {Bytes} bytes)...",
+            // SHA-256 fallback: only computed when Graph provided no hash.
+            if (req.FileHash is null)
+            {
+                req.FileHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                _log.LogInformation("[STEP 6] SHA-256 computed from bytes: {Hash}.", req.FileHash);
+            }
+
+            // ---- [7] SQL SAVE (stored procedure) -----------------------------------------
+            _log.LogInformation("[STEP 7] Calling SQL save SP (projectPin={Pin}, quarterCode={Quarter}, metricCode={Metric}, fileHash={Hash})...",
+                path.ProjectPin, path.QuarterCode, path.TopMetric, req.FileHash ?? "(null)");
+            var save = await _sql.SaveAsync(req, path, ct);
+            _log.LogInformation("[STEP 7] SP returned: Data(EvidenceId)={Id}, Message='{Msg}'.", save.EvidenceId, save.Message);
+
+            if (!save.IsSuccess)
+            {
+                _log.LogError("[STEP 7] SP reported FAILURE (Data=0). Message='{Msg}'. Will retry -> DLQ.", save.Message);
+                throw new TransientApiException($"Save SP error for {req.FileName}: {save.Message}");
+            }
+            _log.LogInformation("[STEP 7] SAVE SUCCESS. EvidenceId={Id}.", save.EvidenceId);
+
+            // ---- [8] PROCESS API (Document Intelligence) ---------------------------------
+            _log.LogInformation("[STEP 8] Calling Backend API /process (EvidenceId={Id}, {Bytes} bytes)...",
                 save.EvidenceId, bytes.Length);
             await _api.ProcessAsync(save.EvidenceId, req, path, bytes, ct);
-            _log.LogInformation("[STEP 7] PROCESS API SUCCESS.");
+            _log.LogInformation("[STEP 8] PROCESS API SUCCESS.");
 
-            // ---- [8] DONE ----------------------------------------------------------------
-            _log.LogInformation("[STEP 8] === COMPLETE for {File} (EvidenceId={Id}) in {Ms} ms. ===",
+            // ---- [9] DONE ----------------------------------------------------------------
+            _log.LogInformation("[STEP 9] === COMPLETE for {File} (EvidenceId={Id}) in {Ms} ms. ===",
                 req.FileName, save.EvidenceId, sw.ElapsedMilliseconds);
             await messageActions.CompleteMessageAsync(message, ct);
         }
@@ -163,15 +177,17 @@ public sealed class EvidenceWorker
         }
         catch (TransientApiException ex)
         {
-            _log.LogWarning(ex, "[RESULT] TRANSIENT failure for {File} after {Ms} ms; abandoning for redelivery.",
+            _log.LogError(ex, "[RESULT] TRANSIENT failure for {File} after {Ms} ms; dead-lettering (retry disabled).",
                 req.FileName, sw.ElapsedMilliseconds);
-            await messageActions.AbandonMessageAsync(message, cancellationToken: ct);
+            await messageActions.DeadLetterMessageAsync(message, deadLetterReason: "TransientFailure",
+                deadLetterErrorDescription: ex.Message, cancellationToken: ct);
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "[RESULT] UNEXPECTED failure for {File} after {Ms} ms; abandoning for redelivery (bounded by MaxDeliveryCount).",
+            _log.LogError(ex, "[RESULT] UNEXPECTED failure for {File} after {Ms} ms; dead-lettering (retry disabled).",
                 req.FileName, sw.ElapsedMilliseconds);
-            await messageActions.AbandonMessageAsync(message, cancellationToken: ct);
+            await messageActions.DeadLetterMessageAsync(message, deadLetterReason: "UnexpectedFailure",
+                deadLetterErrorDescription: ex.Message, cancellationToken: ct);
         }
     }
 }

@@ -93,7 +93,8 @@ public sealed class SqlEvidenceRepository
                 Language        = "en",
                 // Metric-agnostic EvidenceType.Code from the folder path (e.g. "CANNIBAL_SUMMARY_REPORT").
                 // The save SP resolves this Code -> EvidenceType.EvidenceTypeId (mirrors MetricCode -> MetricId).
-                EvidenceTypeCode = path.EvidenceType
+                EvidenceTypeCode = path.EvidenceType,
+                FileHash         = req.FileHash    // quickXorHash / sha256Hash from Graph, or SHA-256 of bytes; null = no hash available
             }
         };
 

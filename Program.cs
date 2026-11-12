@@ -1,4 +1,3 @@
-using Aepw.Evidence.Worker;
 using Aepw.Evidence.Worker.Services;
 using Azure.Identity;
 using Microsoft.Azure.Functions.Worker;
@@ -8,31 +7,41 @@ using Microsoft.Graph;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
-    .ConfigureGeneratedFunctionMetadataProvider()
-    .ConfigureGeneratedFunctionExecutor()
     .ConfigureServices(services =>
     {
         services.AddApplicationInsightsTelemetryWorkerService();
         services.ConfigureFunctionsApplicationInsights();
 
-        services.AddSingleton<DefaultAzureCredential>();
-        services.AddSingleton<Azure.Core.TokenCredential>(sp =>
-            sp.GetRequiredService<DefaultAzureCredential>());
+        // Managed Identity — used for Backend API bearer token.
+        var managedIdentityCredential = new DefaultAzureCredential(); 
+        services.AddSingleton<Azure.Core.TokenCredential>(managedIdentityCredential);
 
+        // SharePointPOC App Registration — used for Microsoft Graph.
+        var tenantId = Environment.GetEnvironmentVariable("Graph__TenantId")
+            ?? throw new InvalidOperationException("Missing app setting 'Graph__TenantId'.");
+
+        var clientId = Environment.GetEnvironmentVariable("Graph__ClientId")
+            ?? throw new InvalidOperationException("Missing app setting 'Graph__ClientId'.");
+
+        var clientSecret = Environment.GetEnvironmentVariable("Graph__ClientSecret")
+            ?? throw new InvalidOperationException("Missing app setting 'Graph__ClientSecret'.");
+
+        var graphCredential = new ClientSecretCredential(
+            tenantId,
+            clientId,
+            clientSecret);
+
+        // Microsoft Graph — download files.
         services.AddSingleton(_ => new GraphServiceClient(
-            new ClientSecretCredential(
-                Environment.GetEnvironmentVariable("Graph__TenantId")
-                    ?? throw new InvalidOperationException("Missing app setting 'Graph__TenantId'."),
-                Environment.GetEnvironmentVariable("Graph__ClientId")
-                    ?? throw new InvalidOperationException("Missing app setting 'Graph__ClientId'."),
-                Environment.GetEnvironmentVariable("Graph__ClientSecret")
-                    ?? throw new InvalidOperationException("Missing app setting 'Graph__ClientSecret'.")),
+            graphCredential,
             new[] { "https://graph.microsoft.com/.default" }));
 
         services.AddSingleton<GraphDownloader>();
 
+        // Direct SQL save via stored procedure.
         services.AddSingleton<SqlEvidenceRepository>();
 
+        // Backend API.
         services.AddTransient<BackendApiTokenHandler>();
 
         services.AddHttpClient<BackendApiClient>(client =>
