@@ -12,7 +12,8 @@ namespace Aepw.Evidence.Worker.Functions;
 /// <summary>
 /// FUNCTION #2 — the Worker. Verbose, step-by-step logging so each stage is visible in the logs:
 ///   [1] message received  →  [2] parse body  →  [3] event type  →  [4] parse WebUrl
-///   →  [5] get file hash  →  [6] download    →  [7] SQL save    →  [8] process API  →  [9] done
+///   →  [5] get file hash  →  [6] download    →  [7] SQL save
+///   →  [SKIP CHECK] already-processed guard  →  [8] process API  →  [9] done
 /// deleted events call the delete SP (soft delete by ItemId) at [STEP 3].
 ///
 /// Message settlement is manual (host.json: autoCompleteMessages = false) so the retry budget is
@@ -156,6 +157,20 @@ public sealed class EvidenceWorker
                 throw new TransientApiException($"Save SP error for {req.FileName}: {save.Message}");
             }
             _log.LogInformation("[STEP 7] SAVE SUCCESS. EvidenceId={Id}.", save.EvidenceId);
+
+            // ---- [SKIP CHECK] IDEMPOTENCY GUARD — skip agent if already processed + hash matches --
+            _log.LogInformation("[SKIP CHECK] Calling {Sp} for EvidenceId={Id}, FileHash={Hash}...",
+                "uspEvidenceCheckAlreadyProcessed", save.EvidenceId, req.FileHash ?? "(null)");
+            var check = await _sql.CheckAlreadyProcessedAsync(save.EvidenceId, req.FileHash, ct);
+            if (check.AlreadyProcessed)
+            {
+                _log.LogInformation("[SKIP] EvidenceId={Id} already processed (status={Status}, hash match) — skipping reprocess.",
+                    save.EvidenceId, check.CurrentStatusCode);
+                await messageActions.CompleteMessageAsync(message, ct);
+                return;
+            }
+            _log.LogInformation("[SKIP CHECK] Not already processed (status={Status}) — continuing to process API.",
+                check.CurrentStatusCode ?? "(null)");
 
             // ---- [8] PROCESS API (Document Intelligence) ---------------------------------
             _log.LogInformation("[STEP 8] Calling Backend API /process (EvidenceId={Id}, {Bytes} bytes)...",

@@ -42,6 +42,7 @@ public sealed class SqlEvidenceRepository
 {
     private const string SpName = "dbo.uspReviewSaveReviewMetricEvidences";
     private const string DeleteSpName = "dbo.uspReviewDeleteReviewMetricEvidence";
+    private const string CheckSpName = "dbo.uspEvidenceCheckAlreadyProcessed";
     private readonly string _connectionString;
     private readonly long _serviceUserId;
     private readonly ILogger<SqlEvidenceRepository> _log;
@@ -393,6 +394,89 @@ public sealed class SqlEvidenceRepository
                 "===== SQL DEBUG DELETE FAILED: Unexpected exception ===== DurationMs={Ms}",
                 sw.ElapsedMilliseconds);
 
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Calls dbo.uspEvidenceCheckAlreadyProcessed(@EvidenceId, @FileHash).
+    /// Returns AlreadyProcessed=true only when the SP confirms the evidence has a good processed
+    /// status AND the stored FileHash matches the supplied hash. Any SP error is classified and
+    /// rethrown via SqlErrorClassifier (same contract as SaveAsync).
+    /// If the SP returns no rows the result defaults to AlreadyProcessed=false (safe — process continues).
+    /// </summary>
+    public async Task<AlreadyProcessedResult> CheckAlreadyProcessedAsync(
+        long evidenceId,
+        string? fileHash,
+        CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+
+        _log.LogInformation(
+            "[SQL] CheckAlreadyProcessed: EvidenceId={Id}, FileHash={Hash}",
+            evidenceId,
+            fileHash ?? "(null)");
+
+        try
+        {
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
+
+            await using var cmd = new SqlCommand(CheckSpName, conn)
+            {
+                CommandType = CommandType.StoredProcedure
+            };
+
+            cmd.Parameters.Add("@EvidenceId", SqlDbType.BigInt).Value = evidenceId;
+            cmd.Parameters.Add("@FileHash", SqlDbType.NVarChar, 128).Value =
+                fileHash is null ? DBNull.Value : (object)fileHash;
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            if (!await reader.ReadAsync(ct))
+            {
+                _log.LogWarning(
+                    "[SQL] {Sp} returned no rows for EvidenceId={Id} after {Ms} ms; treating as not-processed.",
+                    CheckSpName, evidenceId, sw.ElapsedMilliseconds);
+                return new AlreadyProcessedResult();   // AlreadyProcessed defaults to false
+            }
+
+            var alreadyProcessedOrdinal  = reader.GetOrdinal("AlreadyProcessed");
+            var currentStatusCodeOrdinal = reader.GetOrdinal("CurrentStatusCode");
+            var storedFileHashOrdinal    = reader.GetOrdinal("StoredFileHash");
+
+            var result = new AlreadyProcessedResult
+            {
+                AlreadyProcessed  = reader.GetBoolean(alreadyProcessedOrdinal),
+                CurrentStatusCode = reader.IsDBNull(currentStatusCodeOrdinal)
+                                        ? null
+                                        : reader.GetString(currentStatusCodeOrdinal),
+                StoredFileHash    = reader.IsDBNull(storedFileHashOrdinal)
+                                        ? null
+                                        : reader.GetString(storedFileHashOrdinal)
+            };
+
+            _log.LogInformation(
+                "[SQL] CheckAlreadyProcessed result: AlreadyProcessed={AP}, Status={Status}, DurationMs={Ms}",
+                result.AlreadyProcessed, result.CurrentStatusCode, sw.ElapsedMilliseconds);
+
+            return result;
+        }
+        catch (SqlException ex)
+        {
+            var classified = SqlErrorClassifier.Classify(ex);
+            _log.LogError(
+                ex,
+                "[SQL] {Sp} failed for EvidenceId={Id} after {Ms} ms. Classified={Type}",
+                CheckSpName, evidenceId, sw.ElapsedMilliseconds, classified.GetType().Name);
+            throw classified;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(
+                ex,
+                "[SQL] {Sp} unexpected failure for EvidenceId={Id} after {Ms} ms.",
+                CheckSpName, evidenceId, sw.ElapsedMilliseconds);
             throw;
         }
     }
